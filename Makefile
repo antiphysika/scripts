@@ -20,9 +20,9 @@ install-etc:
 	do \
 	    [[ $$file == etc ]] && continue; \
 	    [[ -d $$file ]] && { \
-	        [[ -d /$$file ]] || echo mkdir -m0755 -p "$$file"; \
+	        [[ -d /$$file ]] || mkdir -m0755 -p "$$file"; \
 	    }; \
-	    [[ -f $$file ]] && echo install -m0644 "$$file" "/$$file"; \
+	    [[ -f $$file ]] && install -m0644 "$$file" "/$$file"; \
 	done
 ## }}}
 
