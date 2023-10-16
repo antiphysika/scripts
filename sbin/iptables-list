@@ -1,6 +1,6 @@
 #!/bin/bash
 
-readonly LIB_PATH="$(cd $(dirname "$0")/..; pwd)/lib"
+readonly LIB_PATH="$(cd "${0%/*}/.."; pwd)/lib"
 source "$LIB_PATH"/functions.bash || exit 1
 
 # Ensure /sbin and /usr/sbin are in PATH
