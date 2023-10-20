@@ -133,7 +133,7 @@ def main(argv=sys.argv):
 
   for c in candidates:
     c['files'] = to_str_list(c['files'])
-    print(json.dumps(c, indent=2))
+  print(json.dumps(candidates, indent=2))
 
   return 0
 ## }}}
