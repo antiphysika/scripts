@@ -85,8 +85,14 @@ def find_candidates(path_list):
   c = {}
   for path in path_list:
     for file in find_files(path):
+      if file.is_symlink():
+        # Don't follow symlinks
+        continue
       try:
         size = file.stat().st_size
+        if not size:
+          # Skip empty files
+          continue
         if size not in c.keys():
           c[size] = []
         c[size].append(file.resolve())
@@ -185,8 +191,8 @@ def main(argv=sys.argv):
 
   for dupe in dupes:
     dupe['files'] = to_str_list(dupe['files'])
-    print(f'Duplicate files:')
-    print(json.dumps(dupe, indent=2) + '\n')
+
+  print(json.dumps(dupes, indent=2))
 
   return 0
 ## }}}
