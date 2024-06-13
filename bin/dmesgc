@@ -1,0 +1,178 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use Term::ANSIColor;
+
+# Store last seen timestamp so as to handle KERN_CONT (continuation) messages
+my $ts_prev = 0;
+
+sub parse_dropped_packet
+{
+  my ($msg, $p) = @_;
+
+  my @words = split /\s+/, $msg;
+  for my $word (@words)
+  {
+    if ($word =~ /^([^=]+)\=(.*)$/)
+    {
+      my ($var, $val) = ($1, $2);
+      if ($var =~ /^LEN|TTL|ID|(S|S)PT|LEN$/)
+      {
+        $p->{$var} = scalar $val;
+      }
+      else
+      {
+        $p->{$var} = $val;
+      }
+    }
+    elsif ($word =~ /^([A-Z]+)$/)
+    {
+      $p->{$1} = 1;
+    }
+  }
+}
+
+sub format_msg
+{
+  my ($msg) = @_;
+
+  # [00053200.52] Dropped packet: IN=wifi0 OUT= \
+  #   MAC=xx:xx:xx:xx:xx:xx:yy:yy:yy:yy:yy:yy:yy:yy SRC=192.168.1.254 \
+  #   DST=192.168.1.150 LEN=73 TOS=0x00 PREC=0x00 TTL=64 ID=0 DF PROTO=UDP \
+  #   SPT=18018 DPT=46454 LEN=53
+  if ($msg =~ /CHAIN=([^ ]+) IN=(.*)$/)
+  {
+    $msg = "CHAIN=$1 IN=$2";
+
+    my %packet;
+    &parse_dropped_packet($msg, \%packet);
+
+    if ($packet{'PROTO'} eq 'ICMP')
+    {
+      $msg = sprintf "%s: dropped ICMP packet: %s -> %s",
+        $packet{'IN'},
+        $packet{'SRC'},
+        $packet{'DST'};
+    }
+    elsif ($packet{'PROTO'} =~ /(TCP|UDP)/)
+    {
+      $msg = sprintf "%s: dropped %s packet: %s:%d -> %s:%d",
+        $packet{'IN'},
+        $packet{'PROTO'},
+        $packet{'SRC'},
+        $packet{'SPT'},
+        $packet{'DST'},
+        $packet{'DPT'};
+    }
+  }
+
+  # [00000010.74] audit: type=1400 audit(1539307663.616:52): avc:  denied \
+  #   { read } for  pid=674 comm="systemd-tmpfile" name="config" dev="dm-0" \
+  #   ino=33735509 scontext=system_u:system_r:systemd_tmpfiles_t:s0 \
+  #   tcontext=system_u:object_r:default_t:s0 tclass=file permissive=1
+  elsif ($msg =~ /^audit: .* avc:\s+denied\s+\{ ([^ ]+) \} for (.*)$/)
+  {
+    my $op = $1;
+    my $info = $2;
+    $info =~ s/\s+/ /;
+    $msg = sprintf "avc: %sdenied%s { %s } for %s",
+      color('red'), color('reset'), $op, $info;
+  }
+
+  return $msg;
+}
+
+sub print_line
+{
+  my ($s, $n, $m) = @_;
+  $s = scalar $s;
+  $n = substr $n, 0, 2;
+  $n = "${n}0" if length($n) < 2;
+  $m = &format_msg($m);
+
+  printf "%s[%s", color('green'), color('reset');
+  printf "%08d%s.%s%02d", $s, color('green'), color('reset'), $n;
+  printf "%s]%s", color('green'), color('reset');
+  printf " %s\n", $m;
+}
+
+sub ignore_msg
+{
+  my $msg = shift;
+
+  # Annoyingly long (usually systemd) messages
+  return 1 if $msg =~ /^systemd.*: systemd \d+ running in system mode/;
+
+  # mount.cifs warning that more secure SMBv2.x used in place of SMBv1
+  return 1 if $msg =~ /^No dialect specified.*more secure dialect.*SMB/;
+
+  # systemd[1]: File $line:$line configures an IP firewall (IPAddressDeny=any),
+  # but the local system does not support BPF/cgroup based firewalling.
+  return 1 if $msg =~ /^systemd.* File .* configures an IP firewall/;
+
+  # systemd[1]: Proceeding WITHOUT firewalling in effect!
+  # (This warning is only shown for the first loaded unit using IP firewalling.)
+  return 1 if $msg =~ /^systemd.* Proceeding WITHOUT firewalling/;
+
+  # audit: type=1130 audit(1525986113.897:108): pid=1 uid=0 auid=4294967295 \
+  # ses=4294967295 subj=system_u:system_r:init_t:s0 \
+  # msg='unit=auditd comm="systemd" exe="/lib/systemd/systemd" hostname=? \
+  # addr=? terminal=? res=success'
+  return 1 if $msg =~ /^audit: .* msg=.* res=success/;
+
+  # input: AT Translated Set 2 keyboard as /devices/...
+  return 1 if $msg =~ /^input: .* as \/devices.*/;
+
+  # audit: type=1400 audit(1534803127.077:68): apparmor="STATUS" \
+  # operation="profile_replace" profile="unconfined" \
+  # name="/usr/bin/evince//sanitized_helper" pid=7257 comm="apparmor_parser"
+  return 1 if $msg =~ /^audit:.* apparmor=\"STATUS\"/;
+
+  return 0;
+}
+
+sub parse_line
+{
+  my ($ent, $line) = @_;
+  my ($ts, $msg);
+
+  if ($line =~ /^\[\s*([\d\.]+)\]\s+(.*)$/)
+  {
+    $ts = $1;
+    $ts_prev = $ts;
+    $msg = $2;
+  }
+  elsif ($line =~ /^\s+(.+)$/)
+  {
+    $ts = "$ts_prev.0";
+    $msg = "  $1";
+  }
+  else
+  {
+    print STDERR "unmatched line: $line\n";
+    return;
+  }
+
+  return if &ignore_msg($msg);
+
+  $ts =~ s/^\s+//;
+  my ($sec, $nsec) = split /\./, $ts;
+
+  &print_line($sec, $nsec, $msg)
+}
+
+my $tail_cmd = 'dmesg -w 2>/dev/null';
+open(my $log_fh, '-|', $tail_cmd) or die "open() failed: $!";
+
+while (my $line = <$log_fh>)
+{
+  chomp $line;
+  my %entry = ();
+  &parse_line(\%entry, $line);
+}
+
+##
+# vim: ts=2 sw=2 et fdm=marker :
+##

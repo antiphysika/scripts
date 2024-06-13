@@ -1,0 +1,40 @@
+#!/bin/bash
+
+readonly LIB_PATH="$(cd $(dirname "$0")/..; pwd)/lib"
+source "$LIB_PATH"/functions.bash || exit 1
+
+if [[ -n $ROOT ]]
+then
+  [[ -d $ROOT ]] || die "ROOT environment variable set to non-existent directory '$ROOT'"
+fi
+
+for log in $ROOT/var/log/{{audit/audit,auth,daemon,kern,ssh{,guar}d,user}.log,mail.*,btmp,debug,messages,{fail,last,sys}log}
+do
+  [[ -e $log ]] || continue
+
+  echo ">> Truncating $log"
+  : > $log
+done
+
+clear_journal=0
+while [[ $# -gt 0 ]]
+do
+  arg="$1"
+  shift
+
+  case "$arg" in
+    --journal)
+      clear_journal=1
+      ;;
+    *)
+      ;;
+  esac
+done
+
+if [[ $clear_journal -eq 1 ]]
+then
+  echo ">> Clearing $ROOT/var/log/journal/"
+  rm -rf $ROOT/var/log/journal/*
+fi
+
+## vim: ts=2 sw=2 et fdm=marker :

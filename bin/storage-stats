@@ -1,0 +1,107 @@
+#!/bin/bash
+
+readonly LIB_PATH="$(cd $(dirname "$0")/..; pwd)/lib"
+source "$LIB_PATH"/functions.bash || exit 1
+
+UNITS=G
+
+function die()
+{
+  echo >&2 "$SCRIPT_NAME: error:" "$@"
+  exit 1
+}
+
+function s_mdraid()
+{
+  [[ -e /proc/mdstat ]] || return
+  [[ $(wc -l < /proc/mdstat) -eq 2 ]] && return
+
+  echo -en "MD/RAID\n\n"
+  grep -v ^unused < /proc/mdstat |sed 's/^/  /g'
+}
+
+function s_lvm()
+{
+  [[ -z $(type -P vgs) ]] && return
+  local out="$(vgdisplay 2>&1)"
+  [[ -z $out ]] && return
+
+  echo -en "LVM\n\n"
+  (vgs; echo; lvs; echo)
+}
+
+function s_usage()
+{
+  echo -en "USAGE\n\n"
+
+  local m
+  for m in $(mount |awk '{print $3}')
+  do
+    case "$m" in
+      /dev|\
+      /dev/hugepages|\
+      /dev/mqueue|\
+      /dev/pts|\
+      /dev/shm|\
+      /proc|\
+      /proc/fs/nfsd|\
+      /proc/sys/fs/binfmt_misc|\
+      /run|\
+      /run/lock|\
+      /run/rpc_pipefs|\
+      /run/user/*|\
+      /sys|\
+      /sys/firmware/efi/efivars|\
+      /sys/fs/bpf|\
+      /sys/fs/cgroup|\
+      /sys/fs/cgroup/*|\
+      /sys/fs/fuse/connections|\
+      /sys/fs/pstore|\
+      /sys/fs/selinux|\
+      /sys/kernel/config|\
+      /sys/kernel/debug|\
+      /sys/kernel/debug/tracing|\
+      /sys/kernel/security|\
+      /var/lib/lxcfs)
+        continue
+        ;;
+      *)
+        echo "$m"
+        ;;
+    esac
+
+  done |xargs df -h -B$UNITS
+}
+
+function main()
+{
+  while [[ $# -gt 0 ]]
+  do
+    local arg="$1"
+    shift
+
+    case "$arg" in
+      -G) export UNITS=G ;;
+      -M) export UNITS=M ;;
+      *)  ;;
+    esac
+  done
+
+  s_mdraid
+  s_lvm
+  s_usage
+
+  return 0
+}
+
+if [[ $1 == --watch ]]
+then
+  shift
+  main "$@"
+  exit $?
+fi
+
+exec watch -n30 -d $0 --watch "$@"
+die "exec failed"
+
+## vim: ts=2 sw=2 et fdm=marker :
