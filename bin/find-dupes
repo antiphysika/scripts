@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os, sys
+
+import pathlib
+
+import json
+
+import hashlib
+
+## {{{ class Error
+
+class Error(Exception):
+
+  # Error message
+  message = None
+
+  def __init__(self, message):
+    self.message = message
+
+## END of class Error }}}
+
+## {{{ usage([exit_status=1])
+def usage(exit_status=1):
+  argv0 = pathlib.Path(sys.argv[0])
+  print(f'Usage: {argv0.name} [options...] <directory list...>')
+  sys.exit(exit_status)
+## }}}
+
+# {{{ parse_argv(argv)
+def parse_argv(argv):
+  opts = {}
+  args = []
+
+  i = 1
+  while i < len(argv):
+    arg = argv[i]
+
+    if arg in ['-h', '--help']:
+      opts[arg] = True
+    else:
+      if arg.startswith('-'):
+        raise Error(f"Invalid option '{arg}'")
+      else:
+        # Non-option arguemnt, stop here
+        args = argv[i:]
+        break
+
+    i += 1
+
+  return opts, args
+## }}}
+
+## {{{ to_str_list(list)
+def to_str_list(list):
+  ret = []
+  for item in list:
+    ret.append(str(item))
+  return ret
+## }}}
+
+## {{{ find_files(path)
+def find_files(path):
+  file_list = []
+
+  for root, dirs, files in os.walk(path):
+    root_path = pathlib.Path(root)
+    for file in files:
+      file_list.append(root_path / file)
+
+  return file_list
+## }}}
+
+## {{{ sha256_file(path)
+def sha256_file(path):
+  with open(path, 'rb') as fp:
+    sha = hashlib.sha256()
+    sha.update(fp.read())
+    return sha.hexdigest()
+## }}}
+
+## {{{ find_candidates(path_list)
+def find_candidates(path_list):
+  c = {}
+  for path in path_list:
+    for file in find_files(path):
+      if file.is_symlink():
+        # Don't follow symlinks
+        continue
+      try:
+        size = file.stat().st_size
+        if not size:
+          # Skip empty files
+          continue
+        if size not in c.keys():
+          c[size] = []
+        c[size].append(file.resolve())
+      except FileNotFoundError:
+        # Caused by broken symlinks
+        continue
+
+  # Prune unique file-size keys from candidates dict
+  del_keys = []
+  for key in c.keys():
+    if len(c[key]) == 1:
+      del_keys.append(key)
+  for key in del_keys:
+    del c[key]
+
+  candidates = []
+  for size in c.keys():
+    candidates.append({
+      'size': size,
+      'files': c[size],
+    })
+
+  return candidates
+## }}}
+
+## {{{ find_dupes(candidates)
+def find_dupes(candidates):
+  for c in candidates:
+    tmp = []
+    for file in c['files']:
+      sha256 = sha256_file(file.resolve())
+      tmp.append((file, sha256))
+    c['files'] = tmp
+
+  dupe_dict = {}
+  for c in candidates:
+    for file, sha256 in c['files']:
+      if sha256 not in dupe_dict.keys():
+        dupe_dict[sha256] = []
+      dupe_dict[sha256].append(file)
+
+  # Prune unique SHA256 sums
+  del_keys = []
+  for key in dupe_dict.keys():
+    if len(dupe_dict[key]) == 1:
+      del_keys.append(key)
+  for key in del_keys:
+    del dupe_dict[key]
+
+  dupes = []
+  for sha256 in dupe_dict.keys():
+    dupes.append({
+      'sha256': sha256,
+      'files': dupe_dict[sha256],
+    })
+
+  return dupes
+## }}}
+
+## {{{ main([argv=sys.argv])
+def main(argv=sys.argv):
+  argv = argv[:] # Duplicate
+
+  if len(argv) < 2:
+    usage()
+
+  opts, args = parse_argv(argv)
+
+  if len(args) < 1:
+    usage(exit_status=1)
+  if '-h' in opts or '--help' in opts:
+    usage(exit_status=0)
+
+  path_list = []
+  path_list_str = []
+
+  for arg in args:
+    p = pathlib.Path(arg)
+    if not p.is_dir():
+      raise Error(f"Directory '{p}' doesn't exist")
+    rp = p.resolve()
+    path_list.append(rp)
+
+  #path_list_json = json.dumps(to_str_list(path_list), indent=2)
+  #print(f'path_list = {path_list_json}\n', file=sys.stderr)
+
+  candidates = find_candidates(path_list)
+  if not len(candidates):
+    print("No duplicate files found")
+    return 0
+
+  dupes = find_dupes(candidates)
+  if not len(dupes):
+    print("No duplicate files found")
+    return 0
+
+  for dupe in dupes:
+    dupe['files'] = to_str_list(dupe['files'])
+
+  print(json.dumps(dupes, indent=2))
+
+  return 0
+## }}}
+
+if __name__ == '__main__':
+  try:
+    sys.exit(main())
+  except KeyboardInterrupt:
+    pass
+
+##
+# vim: ts=2 sw=2 et fdm=marker :
+##

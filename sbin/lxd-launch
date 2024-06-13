@@ -1,0 +1,270 @@
+#!/bin/bash
+
+## {{{ Globals
+#
+
+# Script filename
+SCRIPT_NAME="${0##*/}"
+
+# Error message from parse_args()
+OPT_ERROR=
+
+# Array of non-option arguments
+OPT_ARGS=()
+
+OPTV_HELP=false       # -h/--help
+OPTV_VERBOSE=false    # -v/--verbose
+OPTV_QUIET=false      # -q/--quiet
+OPTV_DRYRUN=false     # --dryrun
+OPTV_V4ADDR=          # -4/--ipv4-address
+OPTV_AUTOSTART=false  # --[no]auto
+
+# List of packages to purge
+PKG_PURGE=(
+  apport
+  bcache-tools
+  bolt
+  dmidecode
+  eject
+  ftp
+  fuse3
+  fwupd-signed
+  landscape-common
+  open-iscsi
+  open-vm-tools
+  plymouth
+  tnftp
+  ubuntu-advantage-tools
+  ubuntu-release-upgrader-core
+  ufw
+  unattended-upgrades
+  usb-modeswitch
+)
+
+#
+## }}}
+
+## {{{ info()
+function info()
+{
+  echo ">>" "$@"
+}
+## }}}
+
+## {{{ error()
+function error()
+{
+  echo >&2 "$SCRIPT_NAME: error:" "$@"
+}
+## }}}
+
+## {{{ die()
+function die()
+{
+  error "$@"
+  exit 1
+}
+## }}}
+
+## {{{ usage_short()
+function usage_short()
+{
+  echo "Usage: $SCRIPT_NAME [options...] <name>"
+}
+## }}}
+
+## {{{ usage_long()
+function usage_long()
+{
+  echo -e "$SCRIPT_NAME(1): Automatically create/renew certbot certs\n"
+  usage_short
+  echo
+
+  echo "Options:"
+  echo
+  echo "  -h, --help"
+  echo "  Display these usage instructions"
+  echo
+  echo "  --dryrun"
+  echo "  Perform a trial run with no action performed"
+  echo
+  echo "  -4 ADDR, --ipv4-address ADDR"
+  echo "  Assign IPv4 address ADDR to container"
+  echo
+  echo "  --[no]auto"
+  echo "  Start container automatically at boot (default: enabled)"
+}
+## }}}
+
+## {{{ parse_args()
+function parse_args()
+{
+  local arg=
+
+  while [[ $# -gt 0 ]]
+  do
+    arg="$1"
+    shift
+
+    case "$arg" in
+      -h|--help)
+        OPTV_HELP=true
+        ;;
+      -q|--quiet)
+        OPTV_QUIET=true
+        ;;
+      -v|--verbose)
+        OPTV_VERBOSE=true
+        ;;
+      --dryrun)
+        OPTV_DRYRUN=true
+        ;;
+      -4|--ipv4-address)
+        if [[ $# -lt 1 ]]
+        then
+          OPT_ERROR="option '$arg' requires an argument"
+          return 1
+        fi
+        OPTV_V4ADDR="$1"
+        shift
+        ;;
+      --auto|--noauto)
+        [[ $arg == --auto ]] && OPTV_AUTOSTART=true || OPTV_AUTOSTART=false
+        ;;
+      --)
+        # POSIX stop-parsing-here thing
+        break 2
+        ;;
+      -*)
+        OPT_ERROR="unknown option '$arg'"
+        return 1
+        ;;
+      *)
+        # Non-option argument, stop parsing
+        set -- "$arg" "$@"
+        break 2
+        ;;
+    esac
+  done
+
+  if [[ $OPTV_QUIET == true && $OPTV_VERBOSE == true ]]
+  then
+    OPT_ERROR="--quiet and --verbose are mutually exclusive"
+    return 1
+  fi
+
+  [[ $# -gt 0 ]] && OPT_ARGS=("$@")
+
+  return 0
+}
+## }}}
+
+## {{{ launch()
+function launch()
+{
+  local name="$1"
+
+  if [[ $OPTV_DRYRUN == true ]]
+  then
+    function lxc()
+    {
+      echo >&2 "Would execute: lxc" "$@"
+      return 0
+    }
+  fi
+
+  lxc launch ubuntu:lts "$name" || die "$name: lxc(1) launch failed"
+
+  # Bit lame, but launching without starting doesn't appear to be an option
+  lxc stop "$name" || die "$name: lxc(1) stop failed"
+
+  # Override container's IPv4 address
+  if [[ -n $OPTV_V4ADDR ]]
+  then
+    lxc config device override "$name" eth0 ipv4.address="$OPTV_V4ADDR" \
+      || die "$name: eth0: lxc(1) config device override failed"
+  fi
+
+  # Configure container to start automatically
+  if [[ $OPTV_AUTOSTART == true ]]
+  then
+    lxc config set "$name" boot.autostart true
+  fi
+
+  lxc start "$name" || die "$name: lxc(1) start failed"
+
+  if false
+  then
+    # Configure DNS resolver (disabled, likely no longer needed)
+    lxc exec "$name" -- bash -c 'echo nameserver 1.1.1.1 > /etc/resolv.conf'
+  fi
+
+  # Run 'apt update' in the container
+  lxc exec "$name" -- apt update || die "$name: apt(8) update failed"
+
+  # Ditto 'apt dist-upgrade'
+  lxc exec "$name" -- apt dist-upgrade -y || die "$name: apt(8) dist-upgrade failed"
+
+  # Trim some unnecessary packages
+  lxc exec "$name" apt purge "${PKG_PURGE[@]}" \
+    || die "$name: apt(8) purge failed"
+
+  # Install basic tools
+  lxc exec "$name" -- apt install -y git make vim{,-scripts}
+
+  # Configure container's /root/.gitconfig
+  lxc exec "$name" -- git config --global user.name root \
+    || die "$name: git(1) config failed"
+  lxc exec "$name" -- git config --global user.email "root@$name.lxd" \
+    || die "$name: git(1) config failed"
+
+  # Install etckeeper
+  lxc exec "$name" -- apt install -y etckeeper || die "$name: apt(1) install failed"
+
+  # Ensure restricted permissions on containers /etc/.git
+  lxc exec "$name" -- chmod 0700 /etc/.git || die "$name: chmod(1) failed"
+
+  # Create /root/.ssh in container
+  lxc exec "$name" -- mkdir -p ~/.ssh || die "$name: mkdir(1) failed"
+  lxc exec "$name" -- chmod 0700 ~/.ssh || die "$name: chmod(1) failed"
+
+  # Install dtadm's primary SSH public key in container's /root/.ssh
+  lxc file push ~dtadm/.ssh/id_ecdsa.pub "$name/root/.ssh/authorized_keys" \
+    || die "$name: lxc(1) file push failed"
+  lxc exec "$name" -- chmod 0600 ~/.ssh/authorized_keys \
+    || die "$name: chmod(1) failed"
+
+  return 0
+}
+## }}}
+
+## {{{ main()
+function main()
+{
+  if [[ $# -ne 0 ]]
+  then
+    parse_args "$@" || die "$OPT_ERROR"
+  fi
+
+  if [[ $OPTV_HELP == true ]]
+  then
+    usage_long
+    exit 1
+  fi
+
+  [[ ${#OPT_ARGS[@]} -ne 1 ]] && \
+    die "missing 'name' argument. See '$SCRIPT_NAME --help' for more"
+
+  set -- "${OPT_ARGS[@]}"
+  launch "$1" || die "$name: launch() failed"
+
+  return 0
+}
+## }}}
+
+main "$@"
+exit $?
+
+##
+# vim: ts=2 sw=2 et fdm=marker :
+##

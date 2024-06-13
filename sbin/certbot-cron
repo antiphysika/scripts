@@ -1,0 +1,267 @@
+#!/bin/bash
+
+## {{{ Globals
+#
+
+# Script filename
+SCRIPT_NAME="${0##*/}"
+
+# File containing list of domains to get/renew certs for
+CERTBOT_DOMAINS_FILE=/etc/letsencrypt/domains
+
+# Error message from parse_args()
+OPT_ERROR=
+
+# Array of non-option arguments
+OPT_ARGS=()
+
+# Parsed option values
+OPTV_HELP=false
+OPTV_VERBOSE=false
+OPTV_QUIET=false
+OPTV_DRYRUN=false
+
+#
+## }}}
+
+## {{{ info()
+function info()
+{
+  echo ">>" "$@"
+}
+## }}}
+
+## {{{ error()
+function error()
+{
+  echo >&2 "$SCRIPT_NAME: error:" "$@"
+}
+## }}}
+
+## {{{ die()
+function die()
+{
+  error "$@"
+  exit 1
+}
+## }}}
+
+## {{{ usage_short()
+function usage_short()
+{
+  echo "Usage: $SCRIPT_NAME [options...]"
+}
+## }}}
+
+## {{{ usage_long()
+function usage_long()
+{
+  echo -e "$SCRIPT_NAME(1): Automatically create/renew certbot certs\n"
+  usage_short
+  echo
+
+  echo "Options:"
+  echo
+  echo "  -h, --help"
+  echo "  Display these usage instructions"
+  echo
+  echo "  --dryrun"
+  echo "  Perform a trial run with no action performed"
+}
+## }}}
+
+## {{{ parse_args()
+function parse_args()
+{
+  local arg=
+
+  while [[ $# -gt 0 ]]
+  do
+    arg="$1"
+    shift
+
+    case "$arg" in
+      -h|--help)
+        OPTV_HELP=true
+        ;;
+      -q|--quiet)
+        OPTV_QUIET=true
+        ;;
+      -v|--verbose)
+        OPTV_VERBOSE=true
+        ;;
+      --dryrun)
+        OPTV_DRYRUN=true
+        ;;
+      --)
+        # POSIX stop-parsing-here thing
+        break 2
+        ;;
+      -*)
+        OPT_ERROR="unknown option '$arg'"
+        return 1
+        ;;
+      *)
+        # Non-option argument, stop parsing
+        set -- "$arg" "$@"
+        break 2
+        ;;
+    esac
+  done
+
+  if [[ $OPTV_QUIET == true && $OPTV_VERBOSE == true ]]
+  then
+    OPT_ERROR="--quiet and --verbose are mutually exclusive"
+    return 1
+  fi
+
+  [[ $# -gt 0 ]] && OPT_ARGS=("$@")
+
+  return 0
+}
+## }}}
+
+function nginx()
+{
+  case "$1" in
+    stop)
+      systemctl stop nginx || die "nginx: systemctl stop failed"
+      ;;
+    start)
+      systemctl start nginx || die "nginx: systemctl start failed"
+      ;;
+    restart)
+      nginx stop
+      nginx start
+      ;;
+    *)
+      die "Unrecognised command '$1'"
+      ;;
+  esac
+}
+
+function certbot_domains()
+{
+  [[ -f $CERTBOT_DOMAINS_FILE ]] || return
+
+  grep -v '^#' < "$CERTBOT_DOMAINS_FILE" |grep -v '^$'
+}
+
+function openssl_cert_enddate()
+{
+  openssl x509 -enddate -noout -in "$1" |cut -d '=' -f2 2>/dev/null \
+    || echo "Unknown"
+}
+
+function needs_renewal()
+{
+  local domain="$1"
+
+  [[ $OPTV_QUIET != true ]] && \
+    info "Checking expiry of live cert for $domain"
+
+  local live_cert="/etc/letsencrypt/live/$domain"
+  local expires="$(openssl_cert_enddate "$live_cert/fullchain.pem")"
+
+  if openssl x509 -checkend $((5*86400)) -noout -in "$live_cert/fullchain.pem" >/dev/null 2>&1
+  then
+    # Good for 5 more days
+    [[ $OPTV_QUIET != true ]] && \
+      info "Skipping renewal, cert is good until $expires"
+    return 1
+  fi
+
+  return 0
+}
+
+function renew()
+{
+  set -- renew --standalone -d "$domain" --force-renew
+  [[ $OPTV_DRYRUN == true ]] && set -- "$@" --dry-run
+
+  [[ $OPTV_QUIET != true ]] && \
+    info "Executing: certbot $@"
+
+  certbot "$@" || die "$domain: certbot(1) renew failed"
+}
+
+function create()
+{
+  local domain="$1"
+
+  set -- certonly --standalone -d "$domain"
+  [[ $OPTV_DRYRUN == true ]] && set -- "$@" --dry-run
+
+  [[ $OPTV_QUIET != true ]] && \
+    info "Executing: certbot $@"
+
+  certbot "$@" || die "$domain: certbot(1) certonly failed"
+}
+
+function create_or_renew()
+{
+  local domain="$1"
+
+  [[ $OPTV_QUIET != true ]] && \
+    info "Checking if $1 already has a cert"
+
+  local live_cert="/etc/letsencrypt/live/$domain"
+
+  if [[ -f $live_cert/fullchain.pem ]]
+  then
+    [[ $OPTV_QUIET != true ]] && \
+      info "Cert exists, checking if it should be renewed"
+
+    needs_renewal "$domain" || return
+
+    [[ $OPTV_QUIET != true ]] && \
+      info "Attempting to renew cert for domain '$domain'"
+
+    renew "$domain" || die "$domain: renew() failed"
+    return
+  fi
+
+  create "$domain"
+}
+
+## {{{ main()
+function main()
+{
+  if [[ $# -ne 0 ]]
+  then
+    parse_args "$@" || die "$OPT_ERROR"
+  fi
+
+  if [[ $OPTV_HELP == true ]]
+  then
+    usage_long
+    exit 1
+  fi
+
+  local count=0
+  local domain=
+
+  for domain in $(certbot_domains)
+  do
+    [[ $count -gt 0 ]] && echo
+    create_or_renew "$domain"
+    ((count += 1))
+  done
+
+  if [[ $count -eq 0 ]]
+  then
+    [[ $OPTV_QUIET != true ]] && \
+      echo "No domains defined, nothing to do."
+    return 0
+  fi
+
+  return 0
+}
+## }}}
+
+main "$@"
+exit $?
+
+##
+# vim: ts=2 sw=2 et fdm=marker :
+##

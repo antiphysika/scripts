@@ -1,0 +1,30 @@
+#!/bin/bash
+
+function nginx()
+{
+  case "$1" in
+    stop)
+      systemctl stop nginx || die "nginx: systemctl stop failed"
+      ;;
+    start)
+      systemctl start nginx || die "nginx: systemctl start failed"
+      ;;
+    restart)
+      nginx stop
+      nginx start
+      ;;
+    *)
+      die "Unrecognised command '$1'"
+      ;;
+  esac
+}
+
+nginx stop
+certbot-cron
+nginx start
+
+exit 0
+
+##
+# vim: ts=2 sw=2 et fdm=marker :
+##
